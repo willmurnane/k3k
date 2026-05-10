@@ -1,0 +1,59 @@
+{{- if eq .Values.netpol.flavor "ccnp" }}
+{{ /* Mimic the logic in getURLFromService, see pkg/controller/kubeconfig/kubeconfig.go */}}
+{{- $k3kService := (lookup "v1" "Service" "default" "kubernetes") -}}
+
+{{- if $k3kService -}}
+  {{- $ip := "" -}}
+  {{- $port := "" -}}
+
+  {{- /* Case: NodePort (uses Host IP and NodePort) */ -}}
+  {{- if eq $k3kService.spec.type "NodePort" -}}
+    {{- /* 
+       Since Helm lookup can't easily determine 'hostServerIP' without 
+       complex Node lookups, we fallback to 'reserved:host' for the destination 
+    */ -}}
+    {{- $ip = "reserved:host" -}}
+    {{- if $k3kService.spec.ports -}}
+      {{- $port = (index $k3kService.spec.ports 0).nodePort -}}
+    {{- end -}}
+
+  {{- /* Case: LoadBalancer */ -}}
+  {{- else if eq $k3kService.spec.type "LoadBalancer" -}}
+    {{- if and $k3kService.status.loadBalancer.ingress (gt (len $k3kService.status.loadBalancer.ingress) 0) -}}
+      {{- $ip = (index $k3kService.status.loadBalancer.ingress 0).ip -}}
+    {{- end -}}
+    {{- if $k3kService.spec.ports -}}
+      {{- $port = (index $k3kService.spec.ports 0).port -}}
+    {{- end -}}
+  {{- end -}}
+
+  {{- /* Only generate the policy if we successfully resolved a port */ -}}
+  {{- if $port -}}
+---
+apiVersion: "cilium.io/v2"
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: "allow-agent-to-k3k-dynamic"
+spec:
+  endpointSelector:
+    matchLabels:
+      type: agent
+  egress:
+    - toEndpoints:
+        {{- if eq $ip "reserved:host" }}
+        - matchLabels:
+            "reserved:host": ""
+        {{- else if $ip }}
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": default
+        # If it's a specific IP, we use toCIDR for precision
+      toCIDR:
+        - {{ printf "%s/32" $ip }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: {{ $port | quote }}
+              protocol: TCP
+{{- end /* if $port */ -}}
+{{- end /* if $k3kService */ -}}
+{{- end /* if ccnp netpol is enabled */ -}}
